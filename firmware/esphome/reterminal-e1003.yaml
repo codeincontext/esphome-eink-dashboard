@@ -1,0 +1,937 @@
+# Daily-brief layout on reTerminal E1003.
+# Pulls strings from sensor.eink_* entities published by our Python server.
+
+substitutions:
+  device_name: reterminal-e1003
+  friendly_name: reTerminal E1003
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  includes:
+    - reterminal_helpers.h
+  on_boot:
+    priority: 300
+    then:
+      - delay: 2s
+      - script.execute: manage_run_and_sleep
+
+deep_sleep:
+  id: deep_sleep_ctl
+  esp32_ext1_wakeup:
+    pins:
+      - number: GPIO3
+        allow_other_uses: true
+      - number: GPIO4
+        allow_other_uses: true
+      - number: GPIO5
+        allow_other_uses: true
+    mode: ANY_LOW
+
+switch:
+  # HA-exposed switch. Flip ON before OTA flashing so the device skips its
+  # post-draw sleep and stays reachable. Flip OFF when done.
+  - platform: template
+    name: "Stay Awake"
+    id: stay_awake
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/koosoli/Seeed-10.3-inch-IT8951-ESPHome-Drivers
+      ref: b6de94aedaea55433db2458b5e5b15f4f7f20b1a
+    components: [it8951_reterminal_e1003]
+
+# Pin assignments are board-fixed for the reTerminal E1003.
+i2c:
+  - sda: GPIO19
+    scl: GPIO20
+    scan: true
+    id: bus_a
+
+spi:
+  - id: it8951_spi
+    clk_pin: GPIO7
+    mosi_pin: GPIO9
+    miso_pin: GPIO8
+
+touchscreen:
+  - platform: gt911
+    id: touchscreen_panel
+    interrupt_pin: GPIO2
+
+script:
+  # Restart-mode debounce: every entity arrival resets the timer, so a burst of
+  # state pushes from HA collapses into a single redraw at the end of the burst.
+  - id: debounced_redraw
+    mode: restart
+    then:
+      - delay: 2s
+      - component.update: epaper_display
+
+  # Top-level wake handler: wait for HA + time sync, pick the right page based
+  # on time-of-day, redraw, hold awake briefly, then go back to deep sleep
+  # (unless Stay Awake is on — that's the OTA bypass).
+  - id: manage_run_and_sleep
+    mode: restart
+    then:
+      - logger.log: "Waking — waiting for HA + time sync"
+      - wait_until:
+          condition:
+            lambda: 'return id(ha_time).now().is_valid() && api_is_connected();'
+          timeout: 120s
+      # Let HA push initial subscribed-state values for our text_sensors.
+      - delay: 5s
+      - lambda: |-
+          int h = id(ha_time).now().hour;
+          if (h >= 7 && h < 21) {
+            id(epaper_display).show_page(id(page_weather));
+          } else {
+            id(epaper_display).show_page(id(page_quote));
+          }
+      - component.update: epaper_display
+      - lambda: |-
+          // Publish last-redraw timestamp in ISO 8601 UTC. now().timestamp is
+          // the unix epoch in UTC; convert back to a UTC ESPTime for formatting.
+          auto utc = esphome::ESPTime::from_epoch_utc(id(ha_time).now().timestamp);
+          char buf[32];
+          snprintf(buf, sizeof(buf),
+                   "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                   utc.year, utc.month, utc.day_of_month,
+                   utc.hour, utc.minute, utc.second);
+          id(last_redraw).publish_state(buf);
+      # Hold awake long enough to push OTA / interact with buttons.
+      - delay: 30s
+      # If Stay Awake is on, hold here until the user turns it off.
+      - if:
+          condition:
+            switch.is_on: stay_awake
+          then:
+            - logger.log: "Stay Awake ON — holding until OFF"
+            - wait_until:
+                switch.is_off: stay_awake
+            - logger.log: "Stay Awake OFF — going to sleep"
+      - lambda: |-
+          auto t = id(ha_time).now();
+          int h = t.hour;
+          int m = t.minute;
+          int s = t.second;
+          uint32_t secs;
+          if (h >= 22) {
+            // 22:00-23:59 → sleep until 07:00 tomorrow
+            secs = ((24 - h) * 3600 + 7 * 3600) - (m * 60 + s);
+          } else if (h < 7) {
+            // 00:00-06:59 → sleep until 07:00 today
+            secs = ((7 - h) * 3600) - (m * 60 + s);
+          } else {
+            // Daytime: 30 min
+            secs = 30 * 60;
+          }
+          ESP_LOGI("sleep", "Sleeping for %u seconds", secs);
+          id(deep_sleep_ctl).set_sleep_duration(secs * 1000);
+      - deep_sleep.enter:
+          id: deep_sleep_ctl
+
+font:
+  # All fonts use bpp:4 for grayscale antialiasing. Pair with passing the
+  # actual background color to it.print so edges blend correctly.
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 26
+    bpp: 4
+    glyphs: &glyphs "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;-!?'\"()/+ °—–"
+  - file: "gfonts://Roboto@700"
+    id: font_small_bold
+    size: 26
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto"
+    id: font_small_mini
+    size: 20
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto"
+    id: font_med
+    size: 38
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto@700"
+    id: font_med_bold_small
+    size: 38
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto@700"
+    id: font_med_bold
+    size: 64
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto"
+    id: font_med_regular_large
+    size: 64
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Roboto@700"
+    id: font_header
+    size: 56
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Merriweather@700"
+    id: font_quote
+    size: 72
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Oswald@300"
+    id: font_label
+    size: 27
+    bpp: 4
+    glyphs: "CDEHLOTW"
+  - file: "gfonts://Oswald@300"
+    id: font_label_xs
+    size: 17
+    bpp: 4
+    glyphs: "CDEHLOTW"
+  - file: "gfonts://Merriweather@700"
+    id: font_quote_small
+    size: 52
+    bpp: 4
+    glyphs: *glyphs
+  - file: "gfonts://Merriweather"
+    id: font_author
+    size: 38
+    bpp: 4
+    glyphs: *glyphs
+  # Emoji icon font, monochrome (Noto Emoji is the line-drawn variant).
+  # bpp: 4 gives 16-level grayscale antialiasing — looks much smoother on
+  # the 226-DPI panel than the default 1-bit rendering.
+  - file: "gfonts://Noto Emoji"
+    id: font_icon
+    size: 144
+    bpp: 4
+    glyphs: "☀🌤⛅☁🌫🌦🌧🌨❄⛈"
+  # Dog icon for the today (full) walk timeline.
+  - file: "gfonts://Noto Emoji"
+    id: font_dog_today
+    size: 58
+    bpp: 4
+    glyphs: "🦮"
+  - file: "gfonts://Noto Emoji"
+    id: font_icon_xs
+    size: 22
+    bpp: 4
+    glyphs: "🌧🌡❄☀"
+  # Row-label icons (rain/temp) for the today timeline; bigger than mini cells.
+  - file: "gfonts://Noto Emoji"
+    id: font_icon_row
+    size: 32
+    bpp: 4
+    glyphs: "🌧🌡"
+  # Dog icon for the mini (tomorrow/day3) walk timelines.
+  - file: "gfonts://Noto Emoji"
+    id: font_dog_mini
+    size: 44
+    bpp: 4
+    glyphs: "🦮"
+
+
+# Subscribe to entities our Python server publishes via HA REST API.
+# String values use text_sensor; numeric values use sensor.
+text_sensor:
+  - platform: homeassistant
+    id: eink_date
+    entity_id: sensor.eink_date
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_footer
+    entity_id: sensor.eink_footer
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_walk
+    entity_id: sensor.eink_walk
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_timeline_rain
+    entity_id: sensor.eink_weather_today_timeline_rain
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_timeline_temp
+    entity_id: sensor.eink_weather_today_timeline_temp
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_timeline_rain
+    entity_id: sensor.eink_weather_tomorrow_timeline_rain
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_timeline_temp
+    entity_id: sensor.eink_weather_tomorrow_timeline_temp
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_timeline_rain
+    entity_id: sensor.eink_weather_day3_timeline_rain
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_timeline_temp
+    entity_id: sensor.eink_weather_day3_timeline_temp
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_icon
+    entity_id: sensor.eink_weather_today_icon
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_temp_low_part
+    entity_id: sensor.eink_weather_today_temp_low_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_temp_high_part
+    entity_id: sensor.eink_weather_today_temp_high_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_body
+    entity_id: sensor.eink_weather_today_body
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_body_aux
+    entity_id: sensor.eink_weather_today_body_aux
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_today_narrative
+    entity_id: sensor.eink_weather_today_narrative
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_narrative
+    entity_id: sensor.eink_weather_tomorrow_narrative
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_narrative
+    entity_id: sensor.eink_weather_day3_narrative
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_label
+    entity_id: sensor.eink_weather_tomorrow_label
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_body
+    entity_id: sensor.eink_weather_tomorrow_body
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_temp_low_part
+    entity_id: sensor.eink_weather_tomorrow_temp_low_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_tomorrow_temp_high_part
+    entity_id: sensor.eink_weather_tomorrow_temp_high_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_label
+    entity_id: sensor.eink_weather_day3_label
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_body
+    entity_id: sensor.eink_weather_day3_body
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_temp_low_part
+    entity_id: sensor.eink_weather_day3_temp_low_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_day3_temp_high_part
+    entity_id: sensor.eink_weather_day3_temp_high_part
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_thought_text
+    entity_id: sensor.eink_thought_text
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_thought_author
+    entity_id: sensor.eink_thought_author
+    on_value: { then: [script.execute: debounced_redraw] }
+  - platform: homeassistant
+    id: eink_thought_context
+    entity_id: sensor.eink_thought_context
+    on_value: { then: [script.execute: debounced_redraw] }
+
+  # Timestamp of the last full redraw, published from manage_run_and_sleep
+  # after component.update. ISO 8601 with timestamp device_class → HA renders
+  # as "X min ago" in the UI and is queryable historically.
+  - platform: template
+    name: "Last Redraw"
+    id: last_redraw
+    device_class: timestamp
+
+sensor:
+  # Battery: raw ADC voltage + linear-interp level estimate. ×2 multiplier
+  # accounts for the on-board resistor divider. update_interval is short so
+  # we get a reading during the brief awake window between wakes.
+  - platform: adc
+    pin: GPIO1
+    name: "Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    update_interval: 10s
+    attenuation: 12db
+    filters:
+      - multiply: 2
+  - platform: template
+    name: "Battery Level"
+    id: battery_level
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    update_interval: never  # recomputed whenever battery_voltage updates
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (v > 4.15f) return 100.0f;
+      if (v < 3.27f) return 0.0f;
+      return (v - 3.27f) / (4.15f - 3.27f) * 100.0f;
+
+binary_sensor:
+  # Physical navigation buttons on the reTerminal E1003 (all active-low,
+  # internal pull-up). Mapping verified empirically:
+  #   GPIO3 = green button (home / refresh)
+  #   GPIO4 = right button (next)
+  #   GPIO5 = left button (previous)
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    name: "Button Home"
+    on_press:
+      - display.page.show: page_overview
+      - component.update: epaper_display
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    name: "Button Next"
+    on_press:
+      - display.page.show_next: epaper_display
+      - component.update: epaper_display
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    name: "Button Previous"
+    on_press:
+      - display.page.show_previous: epaper_display
+      - component.update: epaper_display
+
+display:
+  - platform: it8951_reterminal_e1003
+    id: epaper_display
+    vcom: 1400
+    update_interval: never  # only update when an entity changes
+    pages:
+    - id: page_overview
+      lambda: |-
+        using namespace reterminal;
+        const auto GRAY = GRAY_BG;  // shorter local alias for the quote band fill
+
+        it.fill(WHITE);
+
+        // ------ HEADER (y 0–110, black bg, white text) ------
+        it.filled_rectangle(0, 0, 1872, 110, BLACK);
+        it.print(60, 30, id(font_header), WHITE, id(eink_date).state.c_str(), BLACK);
+        // Two timestamps stacked in the top-right:
+        //  - "Updated HH:MM" — server-side time of the last content publish
+        //    (from sensor.eink_footer; only ticks when content actually changed)
+        //  - "Drawn HH:MM"   — device-side time of THIS render (always current,
+        //    even when content hasn't changed since the last redraw)
+        // A gap between them indicates the device has been waiting on stale
+        // pushes from HA (or just sleeping between content changes).
+        it.print(1812, 20, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                 id(eink_footer).state.c_str(), BLACK);
+        {
+          auto t = id(ha_time).now();
+          if (t.is_valid()) {
+            char buf[20];
+            snprintf(buf, sizeof(buf), "Drawn %02d:%02d", t.hour, t.minute);
+            it.print(1812, 55, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                     buf, BLACK);
+          }
+        }
+
+        // ------ WEATHER (y 110–650, two columns, white bg) ------
+        // Top of the band (y 110–460) reserved for upcoming events / reminders.
+        // Today block sits at the bottom of the band: icon, body, walk.
+        it.print(80, 220, id(font_icon), BLACK, id(eink_today_icon).state.c_str(), WHITE);
+        // Today's temp range, vertically centered against the icon.
+        // The "low–" prefix is muted regular weight; the "high°C" is bold black.
+        {
+          const int tx = 270;
+          const int ty = 297;
+          std::string lo = id(eink_today_temp_low_part).state;
+          std::string hi = id(eink_today_temp_high_part).state;
+          it.print(tx, ty, id(font_med_regular_large), TITLE_MUTED,
+                   TextAlign::CENTER_LEFT, lo.c_str(), WHITE);
+          int x1, y1, w, h;
+          it.get_text_bounds(0, 0, lo.c_str(), id(font_med_regular_large),
+                             TextAlign::CENTER_LEFT, &x1, &y1, &w, &h);
+          it.print(tx + w, ty, id(font_med_bold), BLACK,
+                   TextAlign::CENTER_LEFT, hi.c_str(), WHITE);
+        }
+        // Today's weather: LLM narrative (wraps to multiple lines).
+        // 3 lines of font_med_bold (64pt @ 80 line height) = ~240px, fits cleanly
+        // between the icon (ends ~274) and the timeline rain row (starts 588).
+        print_wrapped(it, 80, 400, id(font_med_bold), BLACK, WHITE,
+                      1000, 80, id(eink_today_narrative).state);
+        // Walk timeline: dog emoji on the left, two merged shaded rows
+        // (rain on top, temp on bottom) for hours 7h–20h.
+        const int walk_y = 735;
+        it.print(80, walk_y, id(font_dog_today), BLACK, TextAlign::CENTER_LEFT, "🦮", WHITE);
+        {
+          const int bar_x = 200;
+          const int bar_x_end = 1080;
+          const int row_h = 32;
+          const int n_hours = 14;  // 07h–20h (last segment = 20:00–21:00)
+          const int seg_w = (bar_x_end - bar_x) / n_hours;
+          const int rain_top = walk_y - row_h;
+          const int temp_top = walk_y;
+          const int bar_bottom = temp_top + row_h;
+
+          // Row labels — thermometer + rain glyphs just left of the bars.
+          it.print(bar_x - 4, rain_top + row_h / 2, id(font_icon_row),
+                   BLACK, TextAlign::CENTER_RIGHT, "🌧", WHITE);
+          it.print(bar_x - 4, temp_top + row_h / 2, id(font_icon_row),
+                   BLACK, TextAlign::CENTER_RIGHT, "🌡", WHITE);
+
+          // Rain row (top), then temp row (bottom). Soft boundaries between
+          // cells of different colors via per-pixel lerp.
+          auto rain = id(eink_today_timeline_rain).state;
+          auto temp = id(eink_today_timeline_temp).state;
+          draw_timeline_row(it, rain, bar_x, rain_top, seg_w, row_h);
+          draw_timeline_row(it, temp, bar_x, temp_top, seg_w, row_h);
+          // Single outline around the merged block.
+          it.rectangle(bar_x, rain_top, n_hours * seg_w, row_h * 2, BLACK);
+
+          // Creche pickup markers — vertical lines at the start of 9h (drop-off)
+          // and 16h (pickup). Drawn before the run labels so the white
+          // COLD/HOT/WET text overprints the black lines.
+          for (int h : {9, 16}) {
+            int x = bar_x + (h - 7) * seg_w;
+            it.filled_rectangle(x - 1, rain_top, 2, row_h * 2, BLACK);
+          }
+
+          // Label each contiguous extreme-cell run with the cause icon.
+          draw_icons_in_runs(it, rain, bar_x, seg_w, rain_top, row_h,
+                             id(font_label), {{'2', "WET"}});
+          draw_icons_in_runs(it, temp, bar_x, seg_w, temp_top, row_h,
+                             id(font_label), {{'C', "COLD"}, {'H', "HOT"}});
+
+          // "Now" marker — downward-pointing filled triangle hovering above
+          // the timeline, apex touching the top edge at the current minute.
+          auto now_t = id(ha_time).now();
+          if (now_t.is_valid()) {
+            float frac_h = now_t.hour + now_t.minute / 60.0f;
+            if (frac_h >= 7.0f && frac_h <= 21.0f) {
+              int now_x = bar_x + (int)((frac_h - 7.0f) * seg_w);
+              const int tri_half_w = 10;
+              const int tri_h = 14;
+              const int gap = 2;
+              int apex_y = rain_top - gap;
+              int top_y = apex_y - tri_h;
+              it.filled_triangle(now_x - tri_half_w, top_y,
+                                 now_x + tri_half_w, top_y,
+                                 now_x, apex_y, BLACK);
+            }
+          }
+
+          // Hour labels — at cell boundaries, not centers. The "Nh" tick sits
+          // at the start of the period N:00→(N+1):00 the cell visually represents.
+          // Loop runs to h=21 to close the right edge of the last cell.
+          // Past ticks (h <= current_hour) drawn dimmer.
+          int now_h = -1;
+          {
+            auto t = id(ha_time).now();
+            if (t.is_valid()) now_h = t.hour;
+          }
+          for (int h = 7; h <= 21; h++) {
+            int idx = h - 7;
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%dh", h);
+            auto font = (h % 2 == 0) ? id(font_small_bold) : id(font_small);
+            esphome::Color label_c = (now_h >= 0 && h < now_h) ? gray(7) : PARA_MUTED;
+            it.print(bar_x + idx * seg_w, bar_bottom + 8,
+                     font, label_c, TextAlign::TOP_CENTER, buf, WHITE);
+          }
+        }
+
+        // Right column — tomorrow + day3 (x 1140–1812). Bold label, regular body.
+        auto draw_day_row = [&](int y, const std::string &label, const std::string &body) {
+          std::string lbl = label + ":";
+          it.print(1140, y, id(font_med_bold_small), BLACK, lbl.c_str(), WHITE);
+          int x1, y1, w, h;
+          it.get_text_bounds(0, 0, lbl.c_str(), id(font_med_bold_small),
+                             TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+          it.print(1140 + w + 12, y, id(font_med), BLACK, body.c_str(), WHITE);
+        };
+        draw_day_row(715, id(eink_tomorrow_label).state, id(eink_tomorrow_body).state);
+        draw_day_row(765, id(eink_day3_label).state, id(eink_day3_body).state);
+
+        // ------ QUOTE BAND (y 910–1300, gray bg) — pass GRAY as bg ------
+        it.filled_rectangle(0, 910, 1872, 390, GRAY);
+        {
+          const int band_top = 910;
+          const int band_height = 390;
+          const int quote_x = 120;
+          const int quote_max_w = 1630;
+          const int gap_after_quote = 40;        // px between quote-end-of-last-line and author
+          const int author_min_x = 1100;         // clamp: author x can't sit further left than this
+          // Pick the largest font whose total height fits the band.
+          // Author sits below the last quote line and adds ~60px (text + gap).
+          // Available vertical for quote text = band_height - 120 (centered, so
+          // author overhang = (band_height - quote_h)/2 + 60 ≤ band_height/2).
+          auto qfont = id(font_quote);
+          int qline_h = 96;
+          int last_line_w = 0;
+          int quote_lines = count_wrapped_lines(it, qfont, quote_max_w,
+                                                id(eink_thought_text).state,
+                                                &last_line_w);
+          if (quote_lines * qline_h > band_height - 120) {
+            qfont = id(font_quote_small);
+            qline_h = 64;
+            quote_lines = count_wrapped_lines(it, qfont, quote_max_w,
+                                              id(eink_thought_text).state,
+                                              &last_line_w);
+          }
+          int quote_h = quote_lines * qline_h;
+          int quote_y = band_top + (band_height - quote_h) / 2;
+          print_wrapped(it, quote_x, quote_y, qfont, BLACK, GRAY,
+                        quote_max_w, qline_h,
+                        id(eink_thought_text).state);
+          // Author left-edge anchored to end of last quote line, clamped to
+          // author_min_x so it's not orphaned mid-page when the last line is short.
+          int author_x = quote_x + last_line_w + gap_after_quote;
+          if (author_x < author_min_x) author_x = author_min_x;
+          // Author sits below the last quote line.
+          int author_y = quote_y + quote_lines * qline_h + 10;
+          std::string author_label = "— " + id(eink_thought_author).state;
+          it.print(author_x, author_y, id(font_author), BLACK,
+                   author_label.c_str(), GRAY);
+        }
+
+        // ------ CONTEXT (y 1320+, white bg) ------
+        print_wrapped(it, 60, 1320, id(font_small), PARA_MUTED, WHITE, 1752, 32,
+                      id(eink_thought_context).state);
+
+    - id: page_weather
+      lambda: |-
+        using namespace reterminal;
+        it.fill(WHITE);
+        // Header band
+        it.filled_rectangle(0, 0, 1872, 110, BLACK);
+        it.print(60, 30, id(font_header), WHITE,
+                 id(eink_date).state.c_str(), BLACK);
+        // Two timestamps stacked in the top-right:
+        //  - "Updated HH:MM" — server-side time of the last content publish
+        //    (from sensor.eink_footer; only ticks when content actually changed)
+        //  - "Drawn HH:MM"   — device-side time of THIS render (always current,
+        //    even when content hasn't changed since the last redraw)
+        // A gap between them indicates the device has been waiting on stale
+        // pushes from HA (or just sleeping between content changes).
+        it.print(1812, 20, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                 id(eink_footer).state.c_str(), BLACK);
+        {
+          auto t = id(ha_time).now();
+          if (t.is_valid()) {
+            char buf[20];
+            snprintf(buf, sizeof(buf), "Drawn %02d:%02d", t.hour, t.minute);
+            it.print(1812, 55, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                     buf, BLACK);
+          }
+        }
+
+        // Helper: draw a temp range "low–high°C" with low muted regular,
+        // high bold black. Returns the right edge x.
+        auto draw_temp_range = [&](int x, int y,
+                                    const std::string &lo, const std::string &hi,
+                                    esphome::display::BaseFont *low_font,
+                                    esphome::display::BaseFont *high_font) -> int {
+          it.print(x, y, low_font, TITLE_MUTED, TextAlign::CENTER_LEFT,
+                   lo.c_str(), WHITE);
+          int x1, y1, w, h;
+          it.get_text_bounds(0, 0, lo.c_str(), low_font,
+                             TextAlign::CENTER_LEFT, &x1, &y1, &w, &h);
+          it.print(x + w, y, high_font, BLACK, TextAlign::CENTER_LEFT,
+                   hi.c_str(), WHITE);
+          int x2, y2, w2, h2;
+          it.get_text_bounds(0, 0, hi.c_str(), high_font,
+                             TextAlign::CENTER_LEFT, &x2, &y2, &w2, &h2);
+          return x + w + w2;
+        };
+
+        // Helper: draw a walk timeline (rain top, temp bottom, merged) with
+        // the dog icon to its left and small row icons.
+        auto draw_timeline = [&](int bar_x, int bar_y, int bar_w, int row_h,
+                                  const std::string &rain,
+                                  const std::string &temp,
+                                  HourLabelMode hour_label_mode,
+                                  bool show_creche,
+                                  bool show_now,
+                                  int label_y_offset,
+                                  esphome::display::BaseFont *dog_font,
+                                  esphome::display::BaseFont *extreme_label_font,
+                                  esphome::display::BaseFont *row_icon_font) {
+          const int n_hours = 14;  // 7h–20h
+          const int seg_w = bar_w / n_hours;
+          // Dog emoji left-aligned with the narrative column (x=80) for all
+          // three timelines, regardless of bar size.
+          it.print(80, bar_y + row_h, dog_font, BLACK,
+                   TextAlign::CENTER_LEFT, "🦮", WHITE);
+          // Rain/temp row icons just left of bars.
+          it.print(bar_x - 4, bar_y + row_h / 2, row_icon_font,
+                   BLACK, TextAlign::CENTER_RIGHT, "🌧", WHITE);
+          it.print(bar_x - 4, bar_y + row_h + row_h / 2, row_icon_font,
+                   BLACK, TextAlign::CENTER_RIGHT, "🌡", WHITE);
+
+          draw_timeline_row(it, rain, bar_x, bar_y, seg_w, row_h);
+          draw_timeline_row(it, temp, bar_x, bar_y + row_h, seg_w, row_h);
+          it.rectangle(bar_x, bar_y, n_hours * seg_w, row_h * 2, BLACK);
+          // Creche lines first so the run labels overprint them.
+          if (show_creche) {
+            for (int h : {9, 16}) {
+              int x = bar_x + (h - 7) * seg_w;
+              it.filled_rectangle(x - 1, bar_y, 2, row_h * 2, BLACK);
+            }
+          }
+          draw_icons_in_runs(it, rain, bar_x, seg_w, bar_y, row_h,
+                             extreme_label_font, {{'2', "WET"}}, label_y_offset);
+          draw_icons_in_runs(it, temp, bar_x, seg_w, bar_y + row_h, row_h,
+                             extreme_label_font, {{'C', "COLD"}, {'H', "HOT"}}, label_y_offset);
+          if (show_now) {
+            auto now_t = id(ha_time).now();
+            if (now_t.is_valid()) {
+              float frac_h = now_t.hour + now_t.minute / 60.0f;
+              if (frac_h >= 7.0f && frac_h <= 21.0f) {
+                int now_x = bar_x + (int)((frac_h - 7.0f) * seg_w);
+                const int tri_half_w = 10;
+                const int tri_h = 14;
+                const int gap = 2;
+                int apex_y = bar_y - gap;
+                int top_y = apex_y - tri_h;
+                it.filled_triangle(now_x - tri_half_w, top_y,
+                                   now_x + tri_half_w, top_y,
+                                   now_x, apex_y, BLACK);
+              }
+            }
+          }
+          if (hour_label_mode != HourLabelMode::NONE) {
+            // Labels at cell boundaries (see overview page for rationale).
+            // Past ticks (h <= current_hour) drawn dimmer.
+            int now_h = -1;
+            {
+              auto t = id(ha_time).now();
+              if (t.is_valid()) now_h = t.hour;
+            }
+            const bool sparse = hour_label_mode == HourLabelMode::SPARSE;
+            for (int h = 7; h <= 21; h++) {
+              if (sparse && h != 7 && h != 9 && h != 16 && h != 21) continue;
+              int idx = h - 7;
+              char buf[8];
+              snprintf(buf, sizeof(buf), "%dh", h);
+              // Full mode alternates bold/regular for hourly rhythm; sparse
+              // mode is too short to need that — keep it small and uniform.
+              auto font = sparse ? id(font_small_mini)
+                                  : ((h % 2 == 0) ? id(font_small_bold) : id(font_small));
+              // Only dim past hours on today's timeline. show_now serves as
+              // the "this is today" signal (mini timelines for tomorrow/day3
+              // have no past — every hour is still in the future).
+              esphome::Color label_c =
+                  (show_now && now_h >= 0 && h < now_h) ? gray(7) : PARA_MUTED;
+              it.print(bar_x + idx * seg_w, bar_y + row_h * 2 + 8,
+                       font, label_c, TextAlign::TOP_CENTER, buf, WHITE);
+            }
+          }
+        };
+
+        // ===== TODAY (y 130 – ~720) =====
+        it.print(80, 180, id(font_icon), BLACK,
+                 id(eink_today_icon).state.c_str(), WHITE);
+        draw_temp_range(280, 270,
+                        id(eink_today_temp_low_part).state,
+                        id(eink_today_temp_high_part).state,
+                        id(font_med_regular_large), id(font_med_bold));
+        print_wrapped(it, 80, 380, id(font_med_bold), BLACK, WHITE,
+                      1700, 80, id(eink_today_narrative).state);
+        // Today's walk timeline, sized to sit just below the narrative.
+        {
+          int today_lines = count_wrapped_lines(it, id(font_med_bold), 1700,
+                                                 id(eink_today_narrative).state);
+          int timeline_y = 380 + today_lines * 80 + 30;
+          draw_timeline(200, timeline_y, 1612, 40,
+                        id(eink_today_timeline_rain).state,
+                        id(eink_today_timeline_temp).state,
+                        HourLabelMode::ALL,
+                        /*show_creche=*/true,
+                        /*show_now=*/true,
+                        /*label_y_offset=*/-2,
+                        id(font_dog_today), id(font_label),
+                        id(font_icon_row));
+        }
+
+        // ===== TOMORROW — bottom-anchored at timeline_y so a longer narrative
+        // grows the section *upward* rather than pushing below day3.
+        {
+          const int timeline_y = 1030;
+          const int line_h = 50;
+          int n_lines = count_wrapped_lines(it, id(font_med), 1700,
+                                             id(eink_tomorrow_narrative).state);
+          int narrative_y = timeline_y - 8 - n_lines * line_h;
+          int label_y = narrative_y - 60;
+          int temp_y = label_y + 18;
+
+          std::string lbl = id(eink_tomorrow_label).state + ":";
+          it.print(80, label_y, id(font_med_bold_small), BLACK, lbl.c_str(), WHITE);
+          int x1, y1, w, h;
+          it.get_text_bounds(0, 0, lbl.c_str(), id(font_med_bold_small),
+                             TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+          int x_after_label = 80 + w + 24;
+          draw_temp_range(x_after_label, temp_y,
+                          id(eink_tomorrow_temp_low_part).state,
+                          id(eink_tomorrow_temp_high_part).state,
+                          id(font_med), id(font_med_bold_small));
+          print_wrapped(it, 80, narrative_y, id(font_med), BLACK, WHITE, 1700, line_h,
+                        id(eink_tomorrow_narrative).state);
+          draw_timeline(170, timeline_y, 830, 28,
+                        id(eink_tomorrow_timeline_rain).state,
+                        id(eink_tomorrow_timeline_temp).state,
+                        HourLabelMode::SPARSE,
+                        /*show_creche=*/true,
+                        /*show_now=*/false,
+                        /*label_y_offset=*/-2,
+                        id(font_dog_mini), id(font_label_xs),
+                        id(font_icon_xs));
+        }
+
+        // ===== DAY3 — bottom-anchored same as tomorrow.
+        // Anchor at 1290 (not 1320) so the hour labels under the bar
+        // (drawn at bar_y + row_h*2 + 8) clear the display's bottom edge.
+        {
+          const int timeline_y = 1290;
+          const int line_h = 50;
+          int n_lines = count_wrapped_lines(it, id(font_med), 1700,
+                                             id(eink_day3_narrative).state);
+          int narrative_y = timeline_y - 8 - n_lines * line_h;
+          int label_y = narrative_y - 60;
+          int temp_y = label_y + 18;
+
+          std::string lbl = id(eink_day3_label).state + ":";
+          it.print(80, label_y, id(font_med_bold_small), BLACK, lbl.c_str(), WHITE);
+          int x1, y1, w, h;
+          it.get_text_bounds(0, 0, lbl.c_str(), id(font_med_bold_small),
+                             TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+          int x_after_label = 80 + w + 24;
+          draw_temp_range(x_after_label, temp_y,
+                          id(eink_day3_temp_low_part).state,
+                          id(eink_day3_temp_high_part).state,
+                          id(font_med), id(font_med_bold_small));
+          print_wrapped(it, 80, narrative_y, id(font_med), BLACK, WHITE, 1700, line_h,
+                        id(eink_day3_narrative).state);
+          draw_timeline(170, timeline_y, 830, 28,
+                        id(eink_day3_timeline_rain).state,
+                        id(eink_day3_timeline_temp).state,
+                        HourLabelMode::SPARSE,
+                        /*show_creche=*/true,
+                        /*show_now=*/false,
+                        /*label_y_offset=*/-2,
+                        id(font_dog_mini), id(font_label_xs),
+                        id(font_icon_xs));
+        }
+
+    - id: page_quote
+      lambda: |-
+        using namespace reterminal;
+        const auto GRAY = GRAY_BG;
+        it.fill(WHITE);
+        // Header band
+        it.filled_rectangle(0, 0, 1872, 110, BLACK);
+        it.print(60, 30, id(font_header), WHITE,
+                 id(eink_date).state.c_str(), BLACK);
+        // Two timestamps stacked in the top-right:
+        //  - "Updated HH:MM" — server-side time of the last content publish
+        //    (from sensor.eink_footer; only ticks when content actually changed)
+        //  - "Drawn HH:MM"   — device-side time of THIS render (always current,
+        //    even when content hasn't changed since the last redraw)
+        // A gap between them indicates the device has been waiting on stale
+        // pushes from HA (or just sleeping between content changes).
+        it.print(1812, 20, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                 id(eink_footer).state.c_str(), BLACK);
+        {
+          auto t = id(ha_time).now();
+          if (t.is_valid()) {
+            char buf[20];
+            snprintf(buf, sizeof(buf), "Drawn %02d:%02d", t.hour, t.minute);
+            it.print(1812, 55, id(font_small), FOOTER, TextAlign::TOP_RIGHT,
+                     buf, BLACK);
+          }
+        }
+
+        // Gray band behind the quote + author. Context stays on white below.
+        const int band_top = 110;
+        const int band_bottom = 1200;
+        it.filled_rectangle(0, band_top, 1872, band_bottom - band_top, GRAY);
+
+        // Quote takes nearly the full band height.
+        const int quote_x = 80;
+        const int quote_max_w = 1712;
+        const int quote_line_h = 110;
+        int last_line_w = 0;
+        int quote_lines = count_wrapped_lines(it, id(font_quote), quote_max_w,
+                                              id(eink_thought_text).state,
+                                              &last_line_w);
+        int quote_h = quote_lines * quote_line_h;
+        int quote_y = band_top + (band_bottom - band_top - quote_h) / 2 - 60;
+        if (quote_y < band_top + 40) quote_y = band_top + 40;
+        print_wrapped(it, quote_x, quote_y, id(font_quote), BLACK, GRAY,
+                      quote_max_w, quote_line_h, id(eink_thought_text).state);
+
+        // Author below quote, right-aligned, on the gray band.
+        std::string author_label = "— " + id(eink_thought_author).state;
+        it.print(1792, quote_y + quote_h + 20, id(font_author), BLACK,
+                 TextAlign::TOP_RIGHT, author_label.c_str(), GRAY);
+
+        // Context at the bottom on white in larger font.
+        print_wrapped(it, 80, 1230, id(font_med), PARA_MUTED, WHITE,
+                      1712, 56, id(eink_thought_context).state);
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    # Page selection lives in the manage_run_and_sleep script now — when the
+    # device sleeps through the hour transition, an on_time trigger wouldn't
+    # fire anyway, so we let each wake pick the right page from current hour.
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name}-fallback"
+    password: !secret ota_password
+
+captive_portal:

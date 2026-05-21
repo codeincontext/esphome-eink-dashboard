@@ -1,0 +1,7 @@
+services:
+  eink-server:
+    image: ghcr.io/codeincontext/esphome-eink-dashboard:latest
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
