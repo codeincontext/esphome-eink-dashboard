@@ -6,3 +6,4 @@ server/scripts/freshness.csv
 firmware/esphome/secrets.yaml
 firmware/esphome/.esphome/
 firmware/esphome/fonts/*.ttf
+server/scripts/probe_asl_comparison.py
