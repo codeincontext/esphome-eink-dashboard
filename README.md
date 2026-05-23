@@ -26,7 +26,7 @@ cp secrets.yaml.example secrets.yaml   # WiFi creds, API encryption key, OTA pas
 ./flash-ota.sh                          # retries every 10s until device wakes
 ```
 
-Layout reference: [`firmware/esphome/LAYOUT.md`](firmware/esphome/LAYOUT.md). Helper functions (timeline rendering, gray palette, hour-label modes): [`firmware/esphome/reterminal_helpers.h`](firmware/esphome/reterminal_helpers.h).
+Helper functions (timeline rendering, gray palette, hour-label modes): [`firmware/esphome/reterminal_helpers.h`](firmware/esphome/reterminal_helpers.h).
 
 ## Server
 
