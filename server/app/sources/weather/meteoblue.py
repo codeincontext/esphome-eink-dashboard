@@ -125,8 +125,10 @@ def _build_hourly_rows(hourly: dict, date_str: str,
     """Normalize Meteoblue hourly response into rows for the given date.
 
     Each row: ``{h, condition, precip, temp}``. Meteoblue's precipitation is
-    already at the displayed hour (no preceding-hour shift like Open-Meteo),
-    so no index offset is needed.
+    accumulated over the *preceding* hour (value at T(N):00 = rain during
+    (N-1):00→N:00), the same convention as Open-Meteo. So precip is read at
+    index ``i + 1`` to make cell ``Nh`` reflect rain *during* N:00→(N+1):00.
+    Temperature and pictocode stay at index ``i`` — they're instantaneous.
     """
     times = hourly.get("time", [])
     precip = hourly.get("precipitation", [])
@@ -148,7 +150,7 @@ def _build_hourly_rows(hourly: dict, date_str: str,
         rows.append({
             "h": hour,
             "condition": condition,
-            "precip": round(precip[i] if i < len(precip) else 0, 1),
+            "precip": round(precip[i + 1] if i + 1 < len(precip) else 0, 1),
             "temp": round(temp[i]) if i < len(temp) and temp[i] is not None else None,
         })
     return rows
