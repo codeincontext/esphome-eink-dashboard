@@ -134,8 +134,8 @@ script:
             // 00:00-06:59 → sleep until 07:00 today
             secs = ((7 - h) * 3600) - (m * 60 + s);
           } else {
-            // Daytime: 30 min
-            secs = 30 * 60;
+            // Daytime: 20 min
+            secs = 20 * 60;
           }
           ESP_LOGI("sleep", "Sleeping for %u seconds", secs);
           id(deep_sleep_ctl).set_sleep_duration(secs * 1000);
