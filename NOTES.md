@@ -51,6 +51,12 @@ Costs to plan for:
 - Still need Open-Meteo for the hourly walk-window logic, OR refactor to use Météo-France for hourly too
 - Two providers running side-by-side during transition (treat the new one as `weather_alt` first, compare for a week, then promote)
 
+## Future: partial refresh & non-flashing waveforms (official it8951 component)
+
+The current display driver (koosoli `it8951_reterminal_e1003`) is full-panel GC16 only — every redraw is a full-screen flash. ESPHome 2026.7.0 added a first-party `it8951` component with a `seeed-reterminal-e1003` model that supports partial (bounding-box) refresh and per-update waveform selection (GC16 full vs DU fast/non-flashing). That would let the "now" arrow slide via a silent DU sliver update while grey weather content stays put, with full GC16 refreshes only on data change.
+
+Requires bumping ESPHome (we're on 2026.4.3 → need ≥2026.7.0) and re-verifying the panel renders. Full analysis, waveform pros/cons, config reference, VCOM caveat, and the migration/test plan: [IT8951-PARTIAL-REFRESH.md](IT8951-PARTIAL-REFRESH.md). Experiment lives on branch `experiment/it8951-official-partial-refresh`.
+
 ## Future: 13.3" Spectra 6 full-colour e-ink
 
 7 colours (black, white, red, yellow, blue, green, orange), 1600x1200. Slower refresh (~30s+) but much richer output for a daily status board.
