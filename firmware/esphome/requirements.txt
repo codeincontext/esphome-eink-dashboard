@@ -1,0 +1,7 @@
+# Pinned ESPHome for this firmware.
+#
+# The display uses ESPHome's first-party `it8951` component with the
+# `Seeed-reTerminal-E1003` model preset, added in ESPHome 2026.7. A typical
+# global install may be older, so flash-ota.sh builds a local venv from this
+# file. Pinned to the exact version verified on-device for reproducible flashes.
+esphome==2026.7.2
