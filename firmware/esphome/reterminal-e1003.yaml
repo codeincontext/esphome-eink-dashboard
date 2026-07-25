@@ -42,6 +42,31 @@ touchscreen:
     id: touchscreen_panel
     interrupt_pin: GPIO2
 
+globals:
+  # Set true only during a silent DU "now"-arrow tick, so the weather page
+  # lambda redraws just the arrow band instead of the whole page.
+  - id: arrow_only
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+interval:
+  # Advance the "now" arrow every 10 min via a silent DU partial refresh of just
+  # its band. Only while the weather page is showing (daytime); the quote page
+  # has no arrow. Full GC16 renders (data pushes, page switches) reposition the
+  # arrow and clear any DU ghosting for free.
+  - interval: 10min
+    then:
+      - if:
+          condition:
+            lambda: 'return id(epaper_display).get_active_page() == id(page_weather);'
+          then:
+            - lambda: 'id(arrow_only) = true;'
+            - it8951.update:
+                id: epaper_display
+                mode: DU
+            - lambda: 'id(arrow_only) = false;'
+
 script:
   # Publish the last-redraw timestamp (ISO 8601 UTC) into the "Drawn HH:MM"
   # header. Called after every full render.
@@ -389,6 +414,7 @@ display:
     id: epaper_display
     vcom: 1400  # Seeed ED103TC2 nominal; not read from this unit's FPC
     update_interval: never  # only update when an entity changes
+    auto_clear_enabled: false  # persist framebuffer → area (partial) updates
     pages:
     - id: page_overview
       lambda: |-
@@ -585,6 +611,36 @@ display:
     - id: page_weather
       lambda: |-
         using namespace reterminal;
+        // Silent DU tick: redraw ONLY the "now" arrow band above today's
+        // timeline, leaving the persisted framebuffer otherwise untouched so
+        // the area update stays a thin sliver. Geometry MUST match the
+        // show_now=true draw_timeline(200, timeline_y, 1612, ...) call below.
+        if (id(arrow_only)) {
+          int today_lines = count_wrapped_lines(it, id(font_med_bold), 1700,
+                                                id(eink_today_narrative).state);
+          int timeline_y = 380 + today_lines * 80 + 30;
+          const int bar_x = 200, bar_w = 1612, n_hours = 14;
+          const int seg_w = bar_w / n_hours;
+          const int tri_half_w = 10, tri_h = 14, gap = 2, pad = 14;
+          // Erase the full-width band (clears the old arrow wherever it was).
+          // Height stops at the apex row (timeline_y - gap) so we don't wipe the
+          // timeline's top border at timeline_y.
+          it.filled_rectangle(bar_x - pad, timeline_y - gap - tri_h - 1,
+                              n_hours * seg_w + 2 * pad, tri_h + gap, WHITE);
+          auto now_t = id(ha_time).now();
+          if (now_t.is_valid()) {
+            float frac_h = now_t.hour + now_t.minute / 60.0f;
+            if (frac_h >= 7.0f && frac_h <= 21.0f) {
+              int now_x = bar_x + (int)((frac_h - 7.0f) * seg_w);
+              int apex_y = timeline_y - gap;
+              int top_y = apex_y - tri_h;
+              it.filled_triangle(now_x - tri_half_w, top_y,
+                                 now_x + tri_half_w, top_y,
+                                 now_x, apex_y, BLACK);
+            }
+          }
+          return;
+        }
         it.fill(WHITE);
         // Header band
         it.filled_rectangle(0, 0, 1872, 110, BLACK);

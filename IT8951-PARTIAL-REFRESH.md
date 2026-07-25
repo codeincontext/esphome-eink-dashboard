@@ -138,53 +138,49 @@ Defaults that matter to us:
 | `invert_colors` | `false` | — |
 | `update_interval` | `1min` | set `never`; we drive updates manually |
 
-## Open questions to resolve ON THIS BRANCH (the actual R&D)
+## Results — implemented and verified on-panel (2026-07-25)
 
-Much of the earlier uncertainty is now resolved by the docs:
+All the earlier uncertainty is resolved. The migration is done and running on the
+device via ESPHome 2026.7.2 (isolated venv at `../.esphome-exp-venv`; the global
+conda esphome was left untouched).
 
-- ~~Can we mix GC16 and DU dynamically?~~ **Yes** — the `it8951.update` action
-  takes a per-update `mode:` override. Explicit, no reliance on auto-selection.
-- ~~Does `auto_clear_enabled:false` give bbox-only refresh?~~ **Yes**, confirmed
-  (32px horizontal rounding, exact vertical, erase-counts-as-draw).
+- **Can we mix GC16 and DU dynamically?** Yes — the `it8951.update` action takes a
+  per-update `mode:` override. We drive full renders with `component.update` (GC16)
+  and the arrow tick with `it8951.update: { mode: DU }`.
+- **`auto_clear_enabled: false` gives bbox-only refresh?** Yes, confirmed on-panel.
+- **Does DU render cleanly while `grayscale: true`?** **YES — verified on the
+  physical panel.** The "now" arrow advances via a silent DU partial with no
+  full-screen flash, crisp black-on-white, no grey wash. This was the pivotal
+  unknown; it works. (Makes sense: the arrow band is pure black/white, so DU has
+  no intermediate greys to mangle.)
+- **Grayscale parity:** the 16-level walk-score timelines render the same under the
+  official component's GC16 as under koosoli. Page navigation confirmed working.
+- **Ghosting:** left `full_update_every` at its default (30); data-push GC16
+  renders + the 07:00/21:00 page switches clear the band regularly. Revisit if
+  ghosting ever looks objectionable during long data-stable stretches.
 
-The **one genuinely open question** left, plus a couple of empirical checks:
+### What shipped (see `firmware/esphome/reterminal-e1003.yaml`)
 
-1. **Does DU render cleanly while `grayscale: true`?** The docs tie DU to
-   `grayscale: false` (1bpp mono) — *"enables fast DU partial refreshes between
-   full cleans"* — and don't confirm DU inside a 16-level display. The
-   `it8951.update mode: DU` override exists regardless, so it's directly
-   testable. Low risk *if* the arrow sliver is pure black-on-white (levels 0/15
-   only); the danger is only if intermediate greys fall in the DU region.
-   **This is the pivotal on-panel test.** Fallback if DU misbehaves in grayscale:
-   the arrow still slides, just with a GC16 area flash of the sliver (small
-   region, so a small flash — still far better than full-panel).
-2. **Grayscale rendering parity.** Confirm the 16-level walk-score cells look the
-   same under the official component's GC16 as they do today (koosoli).
-3. **Ghosting cadence.** Tune `full_update_every` (default 30) to how fast DU
-   ghosting becomes objectionable on this panel.
+- Display: `platform: it8951`, `model: Seeed-reTerminal-E1003`, `vcom: 1400`,
+  `update_interval: never`, `auto_clear_enabled: false`.
+- Always-on: deep sleep removed; `render_now` boot script; `on_time` triggers at
+  07:00/21:00 switch page + full render; HA pushes → `debounced_redraw` (GC16).
+- Silent arrow: `arrow_only` global gates a branch at the top of the `page_weather`
+  lambda that erases + redraws only the arrow band; a 10-min `interval` fires
+  `it8951.update: { mode: DU }` while the weather page is showing.
 
-## Migration sketch (once the above check out)
+### Gotcha found in testing
 
-1. `pip install -U esphome` → ≥ 2026.7.0.
-2. Remove the `external_components:` koosoli block.
-3. Swap the display platform:
-   ```yaml
-   display:
-     - platform: it8951
-       model: seeed-reterminal-e1003
-       id: epaper_display
-       vcom: 1400                 # carry over from current config (default is 2300)
-       update_interval: never     # we drive updates manually
-       auto_clear_enabled: false  # persist framebuffer → area (partial) updates
-       grayscale: true            # 16-level for the weather cells
-       # update_mode: GC16 (default); full_update_every: 30 (default)
-   ```
-4. Confirm a full GC16 render of all three pages matches today (parity check).
-5. Prototype the DU partial arrow sliver — a lambda that erases + redraws only
-   the arrow strip, driven by `it8951.update: { id: epaper_display, mode: DU }`.
-   Measure: does it render cleanly in `grayscale: true`? flash? speed? ghosting?
-6. Only then wire up drop-deep-sleep + on_time page switching + a minute/few-min
-   arrow ticker (DU), with GC16 full renders on data change / `full_update_every`.
+The erase band must **not** reach `timeline_y` — the timeline's top border is drawn
+at that row, and an over-tall erase wipes it (the arrow-only path doesn't redraw
+the border, so it stays white until the next full render). Erase height is
+`tri_h + gap`, stopping at the apex row `timeline_y - gap`, one clear row above the
+border.
 
-Keep the koosoli config buildable (git) until the official path is proven on the
-physical panel.
+### Not yet done / follow-ups
+
+- The `page_overview` arrow (manual Home press only) still updates on full render,
+  not via the DU ticker — extend if desired.
+- Touch is wired in hardware (GT911) but unused — see the touch ideas in chat.
+- The koosoli config remains in git history as the fallback if the official path
+  ever regresses.
