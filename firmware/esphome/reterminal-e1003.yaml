@@ -14,28 +14,7 @@ esphome:
     priority: 300
     then:
       - delay: 2s
-      - script.execute: manage_run_and_sleep
-
-deep_sleep:
-  id: deep_sleep_ctl
-  esp32_ext1_wakeup:
-    pins:
-      - number: GPIO3
-        allow_other_uses: true
-      - number: GPIO4
-        allow_other_uses: true
-      - number: GPIO5
-        allow_other_uses: true
-    mode: ANY_LOW
-
-switch:
-  # HA-exposed switch. Flip ON before OTA flashing so the device skips its
-  # post-draw sleep and stays reachable. Flip OFF when done.
-  - platform: template
-    name: "Stay Awake"
-    id: stay_awake
-    restore_mode: RESTORE_DEFAULT_OFF
-    optimistic: true
+      - script.execute: render_now
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -44,13 +23,6 @@ esp32:
 
 psram:
   mode: octal
-
-external_components:
-  - source:
-      type: git
-      url: https://github.com/koosoli/Seeed-10.3-inch-IT8951-ESPHome-Drivers
-      ref: b6de94aedaea55433db2458b5e5b15f4f7f20b1a
-    components: [it8951_reterminal_e1003]
 
 # Pin assignments are board-fixed for the reTerminal E1003.
 i2c:
@@ -71,27 +43,24 @@ touchscreen:
     interrupt_pin: GPIO2
 
 script:
-  # Restart-mode debounce: every entity arrival resets the timer, so a burst of
-  # state pushes from HA collapses into a single redraw at the end of the burst.
-  - id: debounced_redraw
-    mode: restart
+  # Publish the last-redraw timestamp (ISO 8601 UTC) into the "Drawn HH:MM"
+  # header. Called after every full render.
+  - id: publish_drawn
     then:
-      - delay: 2s
-      - component.update: epaper_display
+      - lambda: |-
+          // now().timestamp is the unix epoch in UTC; convert back to a UTC
+          // ESPTime for formatting.
+          auto utc = esphome::ESPTime::from_epoch_utc(id(ha_time).now().timestamp);
+          char buf[32];
+          snprintf(buf, sizeof(buf),
+                   "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                   utc.year, utc.month, utc.day_of_month,
+                   utc.hour, utc.minute, utc.second);
+          id(last_redraw).publish_state(buf);
 
-  # Top-level wake handler: wait for HA + time sync, pick the right page based
-  # on time-of-day, redraw, hold awake briefly, then go back to deep sleep
-  # (unless Stay Awake is on — that's the OTA bypass).
-  - id: manage_run_and_sleep
-    mode: restart
+  # Select the page for the current time-of-day, full-render (GC16), stamp header.
+  - id: draw_current_page
     then:
-      - logger.log: "Waking — waiting for HA + time sync"
-      - wait_until:
-          condition:
-            lambda: 'return id(ha_time).now().is_valid() && api_is_connected();'
-          timeout: 120s
-      # Let HA push initial subscribed-state values for our text_sensors.
-      - delay: 5s
       - lambda: |-
           int h = id(ha_time).now().hour;
           if (h >= 7 && h < 21) {
@@ -100,47 +69,32 @@ script:
             id(epaper_display).show_page(id(page_quote));
           }
       - component.update: epaper_display
-      - lambda: |-
-          // Publish last-redraw timestamp in ISO 8601 UTC. now().timestamp is
-          // the unix epoch in UTC; convert back to a UTC ESPTime for formatting.
-          auto utc = esphome::ESPTime::from_epoch_utc(id(ha_time).now().timestamp);
-          char buf[32];
-          snprintf(buf, sizeof(buf),
-                   "%04d-%02d-%02dT%02d:%02d:%02dZ",
-                   utc.year, utc.month, utc.day_of_month,
-                   utc.hour, utc.minute, utc.second);
-          id(last_redraw).publish_state(buf);
-      # Hold awake long enough to push OTA / interact with buttons.
-      - delay: 30s
-      # If Stay Awake is on, hold here until the user turns it off.
-      - if:
+      - script.execute: publish_drawn
+
+  # Restart-mode debounce: every entity arrival resets the timer, so a burst of
+  # state pushes from HA collapses into a single redraw at the end of the burst.
+  # Redraws the current page (data changed, not the page) and re-stamps the header.
+  - id: debounced_redraw
+    mode: restart
+    then:
+      - delay: 2s
+      - component.update: epaper_display
+      - script.execute: publish_drawn
+
+  # Boot handler: wait for HA + time sync, then draw. The device stays awake
+  # (mains power) — no deep sleep. Page transitions at 07:00/21:00 are handled by
+  # on_time triggers below; HA data changes by debounced_redraw.
+  - id: render_now
+    mode: restart
+    then:
+      - logger.log: "Boot — waiting for HA + time sync"
+      - wait_until:
           condition:
-            switch.is_on: stay_awake
-          then:
-            - logger.log: "Stay Awake ON — holding until OFF"
-            - wait_until:
-                switch.is_off: stay_awake
-            - logger.log: "Stay Awake OFF — going to sleep"
-      - lambda: |-
-          auto t = id(ha_time).now();
-          int h = t.hour;
-          int m = t.minute;
-          int s = t.second;
-          uint32_t secs;
-          if (h >= 22) {
-            // 22:00-23:59 → sleep until 07:00 tomorrow
-            secs = ((24 - h) * 3600 + 7 * 3600) - (m * 60 + s);
-          } else if (h < 7) {
-            // 00:00-06:59 → sleep until 07:00 today
-            secs = ((7 - h) * 3600) - (m * 60 + s);
-          } else {
-            // Daytime: 20 min
-            secs = 20 * 60;
-          }
-          ESP_LOGI("sleep", "Sleeping for %u seconds", secs);
-          id(deep_sleep_ctl).set_sleep_duration(secs * 1000);
-      - deep_sleep.enter:
-          id: deep_sleep_ctl
+            lambda: 'return id(ha_time).now().is_valid() && api_is_connected();'
+          timeout: 120s
+      # Let HA push initial subscribed-state values for our text_sensors.
+      - delay: 5s
+      - script.execute: draw_current_page
 
 font:
   # All fonts use bpp:4 for grayscale antialiasing. Pair with passing the
@@ -359,7 +313,7 @@ text_sensor:
     entity_id: sensor.eink_thought_context
     on_value: { then: [script.execute: debounced_redraw] }
 
-  # Timestamp of the last full redraw, published from manage_run_and_sleep
+  # Timestamp of the last full redraw, published by the publish_drawn script
   # after component.update. ISO 8601 with timestamp device_class → HA renders
   # as "X min ago" in the UI and is queryable historically.
   - platform: template
@@ -406,7 +360,6 @@ binary_sensor:
       number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
-      allow_other_uses: true
     name: "Button Home"
     on_press:
       - display.page.show: page_overview
@@ -416,7 +369,6 @@ binary_sensor:
       number: GPIO4
       mode: INPUT_PULLUP
       inverted: true
-      allow_other_uses: true
     name: "Button Next"
     on_press:
       - display.page.show_next: epaper_display
@@ -426,16 +378,16 @@ binary_sensor:
       number: GPIO5
       mode: INPUT_PULLUP
       inverted: true
-      allow_other_uses: true
     name: "Button Previous"
     on_press:
       - display.page.show_previous: epaper_display
       - component.update: epaper_display
 
 display:
-  - platform: it8951_reterminal_e1003
+  - platform: it8951
+    model: Seeed-reTerminal-E1003
     id: epaper_display
-    vcom: 1400
+    vcom: 1400  # Seeed ED103TC2 nominal; not read from this unit's FPC
     update_interval: never  # only update when an entity changes
     pages:
     - id: page_overview
@@ -919,9 +871,19 @@ api:
 time:
   - platform: homeassistant
     id: ha_time
-    # Page selection lives in the manage_run_and_sleep script now — when the
-    # device sleeps through the hour transition, an on_time trigger wouldn't
-    # fire anyway, so we let each wake pick the right page from current hour.
+    # Always awake now, so on_time fires reliably. Redraw at the day/night
+    # boundaries; draw_current_page picks the page from the current hour.
+    on_time:
+      - hours: 7
+        minutes: 0
+        seconds: 0
+        then:
+          - script.execute: draw_current_page
+      - hours: 21
+        minutes: 0
+        seconds: 0
+        then:
+          - script.execute: draw_current_page
 
 ota:
   - platform: esphome
