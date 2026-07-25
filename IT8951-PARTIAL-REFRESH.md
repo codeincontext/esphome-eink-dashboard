@@ -127,7 +127,8 @@ Defaults that matter to us:
 | Option | Default | Our value / note |
 |--------|---------|------------------|
 | `model` | (required) | `seeed-reterminal-e1003` (built-in preset) |
-| `vcom` | `2300` mV (generic fallback) | **set `1400`** — but note this is only a *sensible inherited default*, not a calibrated value. `1400` is the koosoli example default (identical across all their sample configs); we copied it. It renders fine but has never been checked against this unit's real VCOM (printed on the FPC cable). Optimal value = read the cable or tune empirically; matters more once DU ghosting is in play. |
+| `model` | (required) | `Seeed-reTerminal-E1003` — a **built-in preset** (one of 4: generic `IT8951`, `m5stack-m5paper`, `Seeed-reTerminal-E1003`, `Seeed-EE03`). Auto-sets pins + dimensions (cs/busy/reset/enable become optional). Still need the `spi:` block. |
+| `vcom` | `2300` mV (generic fallback; no documented Seeed default) | **set `1400`.** This is *not* a copy-paste default — it's the value **Seeed documents for this exact panel**: their GxEPD2 driver comment says *"ED103TC2 needs VCOM = -1.40 V"* (they wrote a custom driver because it differs from the Waveshare 10.3"'s ~-2.33 V). So 1400 is a legitimate panel nominal. Residual uncertainty is only per-*unit* variance (tens of mV, marked on the FPC inside the case) — not worth chasing unless ghosting appears. |
 | `update_mode` | `GC16` | default full; override per-update via the action |
 | `auto_clear_enabled` | `true` | **set `false`** for persistent framebuffer → area updates |
 | `full_update_every` | `30` | forced GC16 every N updates + first-after-boot, clears ghosting |
