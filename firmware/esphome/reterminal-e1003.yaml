@@ -52,14 +52,16 @@ globals:
 
 interval:
   # Advance the "now" arrow every 10 min via a silent DU partial refresh of just
-  # its band. Only while the weather page is showing (daytime); the quote page
-  # has no arrow. Full GC16 renders (data pushes, page switches) reposition the
-  # arrow and clear any DU ghosting for free.
+  # its band. Only on pages that have an arrow (weather/overview); the quote page
+  # has none. Full GC16 renders (data pushes, page switches) reposition the arrow
+  # and clear any DU ghosting for free.
   - interval: 10min
     then:
       - if:
           condition:
-            lambda: 'return id(epaper_display).get_active_page() == id(page_weather);'
+            lambda: |-
+              auto *p = id(epaper_display).get_active_page();
+              return p == id(page_weather) || p == id(page_overview);
           then:
             - lambda: 'id(arrow_only) = true;'
             - it8951.update:
@@ -419,6 +421,31 @@ display:
     - id: page_overview
       lambda: |-
         using namespace reterminal;
+        // Silent DU tick: redraw ONLY the "now" arrow band above the timeline.
+        // Geometry mirrors the full render below (bar_x=200, bar_x_end=1080,
+        // rain_top = walk_y(735) - row_h(32)). Erase stops one row above the
+        // timeline border at rain_top so the DU tick doesn't wipe it.
+        if (id(arrow_only)) {
+          const int bar_x = 200, bar_x_end = 1080, n_hours = 14;
+          const int seg_w = (bar_x_end - bar_x) / n_hours;
+          const int rain_top = 735 - 32;
+          const int tri_half_w = 10, tri_h = 14, gap = 2, pad = 14;
+          it.filled_rectangle(bar_x - pad, rain_top - gap - tri_h - 1,
+                              n_hours * seg_w + 2 * pad, tri_h + gap, WHITE);
+          auto now_t = id(ha_time).now();
+          if (now_t.is_valid()) {
+            float frac_h = now_t.hour + now_t.minute / 60.0f;
+            if (frac_h >= 7.0f && frac_h <= 21.0f) {
+              int now_x = bar_x + (int)((frac_h - 7.0f) * seg_w);
+              int apex_y = rain_top - gap;
+              int top_y = apex_y - tri_h;
+              it.filled_triangle(now_x - tri_half_w, top_y,
+                                 now_x + tri_half_w, top_y,
+                                 now_x, apex_y, BLACK);
+            }
+          }
+          return;
+        }
         const auto GRAY = GRAY_BG;  // shorter local alias for the quote band fill
 
         it.fill(WHITE);
